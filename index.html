@@ -184,6 +184,7 @@
         <div class="controls-row">
           <button type="button" class="btn-secondary" id="selectAllCourses">Select all</button>
           <button type="button" class="btn-secondary" id="clearAllCourses">Clear all</button>
+          <button type="button" class="btn-secondary" id="baseGameOnly">Base game only</button>
         </div>
         <div class="courses-list" id="coursesContainer"></div>
       </div>
@@ -262,7 +263,7 @@
       </div>
       <div style="flex: 1;">
         <p class="helper" style="margin: 0;">
-          Fan-made, not created by Mighty Coconut
+          Pro tip: tweak the toggles between rolls to dial in chaos vs. comfort.
         </p>
       </div>
     </div>
@@ -285,6 +286,24 @@
     const SCALE_LABELS   = ["Normal", "Mini", "Giant"];
     const GRAVITY_LABELS = ["Normal", "High", "Low"];
 
+    // Official base-game course names:
+    const BASE_GAME_COURSE_NAMES = [
+      "Tourist Trap",
+      "Cherry Blossom",
+      "Seagull Stacks",
+      "Arizona Modern",
+      "Original Gothic",
+      "Bogey's Bonanza",
+      "Tethys Station",
+      "Quixote Valley",
+      "Shangri-La",
+      "Sweetopia",
+      "20,000 Leagues",
+      "Upside Town",
+      "Laser Lair",
+      "Alfheim"
+    ];
+
     let COURSES = [];
 
     /***********************
@@ -296,7 +315,7 @@
 
       Papa.parse(CSV_URL, {
         download: true,
-        header: false,        // we’ll read by index, not header name
+        header: false,
         skipEmptyLines: true,
         complete: function(results) {
           const rows = results.data;
@@ -352,6 +371,9 @@
           }
 
           renderCourses();
+          // Auto-select base game courses on load
+          autoSelectBaseGameCourses();
+
           randomizeBtn.disabled = false;
           randomizeBtn.textContent = "Randomize Round";
         },
@@ -413,6 +435,14 @@
           <span>${course.name}</span>
         `;
         container.appendChild(label);
+      });
+    }
+
+    function autoSelectBaseGameCourses() {
+      const boxes = document.querySelectorAll("#coursesContainer input[type=checkbox]");
+      boxes.forEach((box, idx) => {
+        const name = COURSES[idx].name.trim();
+        box.checked = BASE_GAME_COURSE_NAMES.includes(name);
       });
     }
 
@@ -491,7 +521,7 @@
     }
 
     /***********************
-     * 4. Randomization logic (settings-first)
+     * 4. Unbiased randomization logic (course-first)
      ***********************/
     function randomize() {
       showError("");
@@ -503,21 +533,20 @@
         return;
       }
 
-      // Difficulties
-      const difficultyOptions = [];
-      if (document.getElementById("difficulty-normal").checked) difficultyOptions.push("Normal");
-      if (document.getElementById("difficulty-hard").checked)  difficultyOptions.push("Hard");
-      if (difficultyOptions.length === 0) {
-        showError("Enable at least one difficulty (Normal and/or Hard).");
-        return;
-      }
-
-      // Allowed global options from toggles
+      // User-allowed options
       const allowedModes     = getCheckedValues("mode",  MODE_LABELS);
       const allowedTurns     = getCheckedValues("turn",  TURN_LABELS);
       const allowedScales    = getCheckedValues("scale", SCALE_LABELS);
       const allowedGravities = getCheckedValues("gravity", GRAVITY_LABELS);
 
+      const difficultyOptions = [];
+      if (document.getElementById("difficulty-normal").checked) difficultyOptions.push("Normal");
+      if (document.getElementById("difficulty-hard").checked)  difficultyOptions.push("Hard");
+
+      if (difficultyOptions.length === 0) {
+        showError("Enable at least one difficulty (Normal and/or Hard).");
+        return;
+      }
       if (allowedModes.size === 0) {
         showError("Enable at least one game mode.");
         return;
@@ -533,56 +562,62 @@
 
       const holesPref = getHolesPreference();
 
-      // Convert sets to arrays
-      const modeArray    = Array.from(allowedModes);
-      const turnArray    = Array.from(allowedTurns);
-      const scaleArray   = Array.from(allowedScales);
-      const gravityArray = Array.from(allowedGravities);
-
       let attempts = 0;
-      let picked   = null;
+      let chosen = null;
 
-      while (attempts < 500 && !picked) {
+      while (attempts < 500 && !chosen) {
         attempts++;
 
-        // 1) Pick settings first
-        const difficulty = pickRandom(difficultyOptions);
-        const mode       = pickRandom(modeArray);
-        const scale      = pickRandom(scaleArray);
-        const gravity    = pickRandom(gravityArray);
+        // 1️⃣ Pick a course first (unbiased)
+        const course = pickRandom(selectedCourses);
 
+        // 2️⃣ Valid options = user toggles ∩ course-supported
+
+        // Game modes
+        const possibleModes = MODE_LABELS.filter(m =>
+          allowedModes.has(m) && course.modes[m]
+        );
+        if (possibleModes.length === 0) {
+          // user blocked all modes this course supports → reroll course
+          continue;
+        }
+        const mode = pickRandom(possibleModes);
+
+        // Turn order
         let turnOrder;
         if (mode === "Practice") {
           turnOrder = "None (practice mode)";
         } else if (mode === "Race") {
           turnOrder = "Simultaneous (race)";
+          if (!course.turnOrders["Simultaneous"]) continue;
         } else {
-          if (turnArray.length === 0) continue;
-          turnOrder = pickRandom(turnArray);
+          const possibleTurns = TURN_LABELS.filter(t =>
+            allowedTurns.has(t) && course.turnOrders[t]
+          );
+          if (possibleTurns.length === 0) {
+            continue; // toggles blocked all this course's turn orders
+          }
+          turnOrder = pickRandom(possibleTurns);
         }
 
-        // 2) Find compatible courses
-        const compatibleCourses = selectedCourses.filter(course => {
-          if (!course.modes[mode]) return false;
-          if (!course.scales[scale]) return false;
-          if (!course.gravities[gravity]) return false;
+        // Player scale
+        const possibleScales = SCALE_LABELS.filter(s =>
+          allowedScales.has(s) && course.scales[s]
+        );
+        if (possibleScales.length === 0) continue;
+        const scale = pickRandom(possibleScales);
 
-          if (mode === "Practice") {
-            return true; // ignore turn order
-          }
+        // Gravity
+        const possibleGravities = GRAVITY_LABELS.filter(g =>
+          allowedGravities.has(g) && course.gravities[g]
+        );
+        if (possibleGravities.length === 0) continue;
+        const gravity = pickRandom(possibleGravities);
 
-          if (mode === "Race") {
-            return !!course.turnOrders["Simultaneous"];
-          }
+        // Difficulty
+        const difficulty = pickRandom(difficultyOptions);
 
-          return !!course.turnOrders[turnOrder];
-        });
-
-        if (compatibleCourses.length === 0) continue;
-
-        const course = pickRandom(compatibleCourses);
-
-        // 3) Holes logic
+        // Holes
         let holesType = "18";
         let whichNine = null;
 
@@ -600,22 +635,22 @@
           }
         }
 
-        picked = {
+        chosen = {
           course: course.name,
+          difficulty,
           mode,
           turnOrder,
           scale,
           gravity,
-          difficulty,
           holesType,
           whichNine
         };
       }
 
-      if (!picked) {
-        showError("No valid combination found with the current settings. Try enabling a few more options or courses.");
+      if (!chosen) {
+        showError("No valid combination found with current settings. Try enabling more modes or turn orders.");
       } else {
-        renderResult(picked);
+        renderResult(chosen);
       }
     }
 
@@ -639,6 +674,10 @@
       document
         .querySelectorAll("#coursesContainer input[type=checkbox]")
         .forEach(box => box.checked = false);
+    });
+
+    document.getElementById("baseGameOnly").addEventListener("click", () => {
+      autoSelectBaseGameCourses();
     });
 
     document.getElementById("randomizeBtn").addEventListener("click", randomize);
